@@ -46,7 +46,7 @@ SHIPPED_VARIANTS = transform.VARIANTS
 SHIPPED_VARIANTS_ENCODED = transform.VARIANTS_ENCODED
 
 REFERENCE_VARIANT = transform.Variant(
-    ip="188.114.97.6",
+    ip="188.114.98.0",
     port="443",
     fm=(
         '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0",'
@@ -481,7 +481,7 @@ def entry(**fields: str) -> tuple:
     each case says only what it is about -- and none breaks when a field is
     added."""
     values = {field: "" for field in transform.Variant._fields}
-    values.update(ip="188.114.97.6", port="443", security="tls")
+    values.update(ip="188.114.98.0", port="443", security="tls")
     unknown = set(fields) - set(values)
     assert not unknown, f"not Variant fields: {unknown}"
     values.update(fields)
@@ -737,9 +737,9 @@ try:
         ("an entry of the old four-field shape", ("{}", "", "", "")),
         ("an entry of the old six-field shape", ("{}", "", "", "", "unsafe", "")),
         ("an entry of the old eight-field shape",
-         ("188.114.97.6", "443", "{}", "", "", "", "unsafe", "")),
+         ("188.114.98.0", "443", "{}", "", "", "", "unsafe", "")),
         ("an entry with a field that is not a string", entry()[:5] + (None,) + entry()[6:]),
-        ("an entry with a port that is not a string", ("188.114.97.6", 443) + entry()[2:]),
+        ("an entry with a port that is not a string", ("188.114.98.0", 443) + entry()[2:]),
     ):
         transform.VARIANTS_ENCODED = [bad]
         try:
@@ -761,7 +761,7 @@ real_healthcheck_mip = (transform.HEALTHCHECK_ADDRESS, transform.HEALTHCHECK_POR
 try:
     DECODED = tuple(getattr(DEFAULT, field) for field in transform.Variant._fields[2:])
     ENDPOINTS = [
-        ("188.114.97.6", "443"),
+        ("188.114.98.0", "443"),
         ("104.16.0.1", "2053"),
         ("2606:4700::1", "8443"),
         ("cf.example.net", "2096"),
@@ -801,7 +801,7 @@ try:
     check("@cf.example.net:2096?" in published[3].to_link(),
           "endpoints: a hostname is published as written")
     check([transform.endpoint_text(ip, port) for ip, port in ENDPOINTS]
-          == ["188.114.97.6:443", "104.16.0.1:2053", "[2606:4700::1]:8443", "cf.example.net:2096"],
+          == ["188.114.98.0:443", "104.16.0.1:2053", "[2606:4700::1]:8443", "cf.example.net:2096"],
           "endpoints: logs and labels write an IPv6 endpoint bracketed, as links do")
 
     # configs.txt is a source. Copies of one node on four addresses must come
@@ -820,14 +820,14 @@ try:
     # What _self_check refuses, and what it lets through.
     for label, endpoint, expected in (
         ("an empty ip", ("", "443"), "empty"),
-        ("an ip with a space around it", (" 188.114.97.6", "443"), "spaces"),
+        ("an ip with a space around it", (" 188.114.98.0", "443"), "spaces"),
         ("a mistyped IPv4 address", ("188.114.976", "443"), "not a valid IPv4 address"),
         ("a bracketed IPv6 address", ("[2606:4700::1]", "443"), "without brackets"),
         ("an ip that is no address at all", ("bad_host!", "443"), "neither an IP address"),
-        ("a Cloudflare plaintext port", ("188.114.97.6", "8080"), "HTTPS ports"),
-        ("an arbitrary port", ("188.114.97.6", "444"), "HTTPS ports"),
-        ("a port that is not a number", ("188.114.97.6", "https"), "HTTPS ports"),
-        ("an empty port", ("188.114.97.6", ""), "HTTPS ports"),
+        ("a Cloudflare plaintext port", ("188.114.98.0", "8080"), "HTTPS ports"),
+        ("an arbitrary port", ("188.114.98.0", "444"), "HTTPS ports"),
+        ("a port that is not a number", ("188.114.98.0", "https"), "HTTPS ports"),
+        ("an empty port", ("188.114.98.0", ""), "HTTPS ports"),
     ):
         set_variants(endpoint + DECODED)
         try:
@@ -837,7 +837,7 @@ try:
             check(expected in str(error), f"endpoints: _self_check rejects {label}")
 
     for port in transform.PORTS_MAPPED_TO_443:
-        set_variants(("188.114.97.6", port) + DECODED)
+        set_variants(("188.114.98.0", port) + DECODED)
         try:
             transform._self_check()
             check(True, f"endpoints: _self_check accepts Cloudflare HTTPS port {port}")

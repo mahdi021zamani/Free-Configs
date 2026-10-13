@@ -62,7 +62,7 @@ from nodes import INSECURE_KEYS, WS_ALIASES, Node
 # the node answers behind Cloudflare, and that stays true whichever Cloudflare
 # address a published link names. So a node tested once can be published on as
 # many addresses as there are variants, and they can change without re-testing.
-HEALTHCHECK_ADDRESS = "188.114.97.6"
+HEALTHCHECK_ADDRESS = "188.114.98.0"
 HEALTHCHECK_PORT = "443"
 
 # --- rules 4-6: port buckets ---------------------------------------------
@@ -164,7 +164,7 @@ class Variant(NamedTuple):
 VARIANTS_ENCODED = [
     (
         # ip
-        "188.114.97.6",
+        "188.114.98.0",
         # port
         "443",
         # fm
@@ -196,7 +196,7 @@ VARIANTS_ENCODED = [
     # ClientHello, with ECH fetched from Cloudflare's DNS over UDP.
     (
         # ip
-        "188.114.97.6",
+        "188.114.98.0",
         # port
         "443",
         # fm
