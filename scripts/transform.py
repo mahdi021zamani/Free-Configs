@@ -218,7 +218,7 @@ VARIANTS_ENCODED = [
     # imitating Chrome's ClientHello.
     (
         # ip
-        "2a06:98c1:3121::7",
+        "2a06:98c1:3101::6812:202f",
         # port
         "443",
         # fm
