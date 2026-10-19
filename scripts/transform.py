@@ -50,6 +50,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import unicodedata
 from typing import NamedTuple
 from urllib.parse import quote, unquote
 
@@ -74,8 +75,15 @@ ALLOWED_SECURITY = ("", "tls", "none")
 ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 
 # --- fields applied AFTER the health check --------------------------------
-# A variant is nine fields put on every survivor. Three say where and how the
-# published link connects:
+# A variant is ten fields put on every survivor. The first names what it
+# publishes:
+#
+#   prefix_name  put at the start of the name of every config the variant
+#                publishes, with a space after it: "F&F" makes
+#                "F&F <name> | <hash>", and "" adds nothing. It is display
+#                text, so it is written plainly below, not percent-encoded.
+#
+# Three say where and how the published link connects:
 #
 #   ip, port     the address and port of the link itself -- not query
 #                parameters, so they are written plainly below, not
@@ -109,7 +117,7 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 #   fp           tlsSettings.fingerprint -- the uTLS ClientHello to imitate
 #   cs           tlsSettings.cipherSuites -- colon-separated Go suite names
 #
-# They travel together as one list of variants, so the nine can never drift
+# They travel together as one list of variants, so the ten can never drift
 # out of step. Every healthy node is published once per variant, its variants
 # adjacent, so N healthy nodes and I variants become N * I lines -- still one
 # configs.txt and one configs_base64.txt. With a single variant, which is the
@@ -117,7 +125,8 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 # on several addresses, add variants that differ only in ip (and port).
 #
 # For the six parameters, "" publishes that parameter's default: nothing is
-# written for it. ip, port and security always need a value.
+# written for it. ip, port and security always need a value; prefix_name may
+# be "".
 # For dialMode that costs nothing, because an absent dialMode and dialMode=""
 # are the same thing to the core -- both run the default dialer.
 #
@@ -137,6 +146,7 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 class Variant(NamedTuple):
     """One published flavour of every healthy node."""
 
+    prefix_name: str
     ip: str
     port: str
     fm: str
@@ -156,13 +166,15 @@ class Variant(NamedTuple):
         return {key: getattr(self, field) for field, key in zip(PARAM_FIELDS, VARIANT_KEYS)}
 
 
-# Add a variant by adding an entry. Each is (ip, port, fm, dialMode, security,
-# ech, echOutbound, fp, cs): ip and port written plainly, the rest
-# percent-encoded exactly as they will be emitted, "" for any of the six
-# parameters publishing that one's default. Write echOutbound as compact JSON
-# on one line.
+# Add a variant by adding an entry. Each is (prefix_name, ip, port, fm,
+# dialMode, security, ech, echOutbound, fp, cs): prefix_name, ip and port
+# written plainly, the rest percent-encoded exactly as they will be emitted, ""
+# for any of the six parameters publishing that one's default. Write
+# echOutbound as compact JSON on one line.
 VARIANTS_ENCODED = [
     (
+        # prefix_name
+        "F&F",
         # ip
         "188.114.98.0",
         # port
@@ -195,6 +207,8 @@ VARIANTS_ENCODED = [
     # As above, without a fragment or a cipher list, imitating Chrome's
     # ClientHello, with ECH fetched from Cloudflare's DNS over UDP.
     (
+        # prefix_name
+        "ECH",
         # ip
         "188.114.98.0",
         # port
@@ -217,6 +231,8 @@ VARIANTS_ENCODED = [
     # On a Cloudflare IPv6 address, without a fragment or a cipher list,
     # imitating Chrome's ClientHello.
     (
+        # prefix_name
+        "IPv6",
         # ip
         "2a06:98c1:3101::6812:202f",
         # port
@@ -238,15 +254,20 @@ VARIANTS_ENCODED = [
     ),
 ]
 
-# The share-link keys of the six parameter fields -- every Variant field after
-# ip and port -- in field order: the spelling :func:`apply_deferred_params`
-# writes and both clients read. PattNG looks
-# echOutbound up with an exact-case map key, so the casing here is load-bearing.
+# The share-link keys of the six parameter fields, in field order: the
+# spelling :func:`apply_deferred_params` writes and both clients read. PattNG
+# looks echOutbound up with an exact-case map key, so the casing here is
+# load-bearing.
 VARIANT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs")
 
 # The Variant field each of those keys is read from -- by name, so the order
 # fields are written in never decides which value lands under which key.
 PARAM_FIELDS = ("fm", "dial_mode", "ech", "ech_outbound", "fp", "cs")
+
+# The fields VARIANTS_ENCODED writes plainly, as they are used: the name prefix
+# and the link's own address. Every other field is percent-encoded there,
+# exactly as it is emitted.
+PLAIN_FIELDS = ("prefix_name", "ip", "port")
 
 # What a variant may publish, and the fields only TLS can carry.
 SECURITY_VALUES = ("tls", "none")
@@ -432,13 +453,28 @@ def endpoint_text(ip: str, port: str) -> str:
     return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
 
+def prefix_name_problem(value: str) -> str | None:
+    """Why ``value`` cannot start the names a variant publishes, or None."""
+    if value != value.strip():
+        return "has spaces around it; the one space after it is added for it"
+    # A name is one line of display text. Emoji are fine, joiners included --
+    # only control characters, line breaks among them, are refused.
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        return "contains a control character, such as a line break"
+    return None
+
+
+# The shape of one VARIANTS_ENCODED entry, as messages about it spell it.
+_ENTRY_SHAPE = "(prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs)"
+
+
 def _decode_variants(entries: object) -> list[Variant]:
     """VARIANTS_ENCODED, decoded. An entry of the wrong shape is refused with a
     message about it, rather than as a TypeError out of the NamedTuple."""
     if not isinstance(entries, (list, tuple)):
         raise AssertionError(
-            "VARIANTS_ENCODED must be a list of (ip, port, fm, dialMode, security,"
-            f" ech, echOutbound, fp, cs) entries, not {type(entries).__name__}"
+            f"VARIANTS_ENCODED must be a list of {_ENTRY_SHAPE} entries,"
+            f" not {type(entries).__name__}"
         )
     decoded: list[Variant] = []
     for index, entry in enumerate(entries):
@@ -448,13 +484,15 @@ def _decode_variants(entries: object) -> list[Variant]:
             or not all(isinstance(value, str) for value in entry)
         ):
             raise AssertionError(
-                f"VARIANTS_ENCODED[{index}] is not an (ip, port, fm, dialMode, security,"
-                f" ech, echOutbound, fp, cs) entry of nine strings: {entry!r}"
+                f"VARIANTS_ENCODED[{index}] is not a {_ENTRY_SHAPE} entry of"
+                f" {len(Variant._fields)} strings: {entry!r}"
             )
-        # ip and port are the link's address, used as written; the rest are
-        # query parameters, stored percent-encoded and decoded here.
-        ip, port, *rest = entry
-        decoded.append(Variant(ip, port, *(unquote(value) for value in rest)))
+        # The plain fields are used as written; the rest are query parameters,
+        # stored percent-encoded and decoded here.
+        decoded.append(Variant(*(
+            value if field in PLAIN_FIELDS else unquote(value)
+            for field, value in zip(Variant._fields, entry)
+        )))
     return decoded
 
 
@@ -470,16 +508,17 @@ INCLUDE_VMESS = False
 # It cannot stand alone, though: one source labels all of its several thousand
 # nodes "@DeltaKroneckerGithub", so on its own the comment would leave most
 # entries indistinguishable in a client. A short content hash is appended to
-# tell them apart. Set KEEP_SOURCE_COMMENT False for generated names only.
+# tell them apart, and each variant's prefix_name goes in front. Set
+# KEEP_SOURCE_COMMENT False for generated names only, or RENAME_NODES False to
+# publish every source's own name untouched: no prefix and no hash.
 RENAME_NODES = True
 KEEP_SOURCE_COMMENT = True
-NAME_PREFIX = ""
 
 
 def _self_check() -> None:
     """Fail loudly at import if a tunable above is unusable, rather than
     silently corrupting configs.txt."""
-    # A variant is one entry of nine fields, so they can never drift out of
+    # A variant is one entry of ten fields, so they can never drift out of
     # step -- but the list itself, and the shape of each entry, are still worth
     # checking here rather than as an IndexError deep inside finalise.
     _decode_variants(VARIANTS_ENCODED)
@@ -487,6 +526,9 @@ def _self_check() -> None:
         raise AssertionError("VARIANTS is empty: there would be nothing to publish")
 
     for index, (variant, encoded) in enumerate(zip(VARIANTS, VARIANTS_ENCODED)):
+        problem = prefix_name_problem(variant.prefix_name)
+        if problem:
+            raise AssertionError(f"VARIANTS[{index}].prefix_name {variant.prefix_name!r} {problem}")
         if variant.security not in SECURITY_VALUES:
             raise AssertionError(
                 f"VARIANTS[{index}].security is {variant.security!r}; it has to be"
@@ -502,8 +544,8 @@ def _self_check() -> None:
                     f"VARIANTS[{index}] is security=none but sets {', '.join(carried)},"
                     " which only exist inside TLS"
                 )
-        for field, value, raw in zip(Variant._fields[2:], variant[2:], encoded[2:]):
-            if quote(value, safe="") != raw:
+        for field, raw in zip(Variant._fields, encoded):
+            if field not in PLAIN_FIELDS and quote(getattr(variant, field), safe="") != raw:
                 raise AssertionError(
                     f"VARIANTS[{index}].{field} does not round-trip through percent-encoding"
                 )
@@ -538,9 +580,13 @@ def _self_check() -> None:
                 raise AssertionError(f"VARIANTS[{index}].cs {problem}")
 
     # Two identical entries would publish the same link twice, which is the one
-    # thing the rest of this pipeline works hardest to avoid.
-    if len(set(VARIANTS)) != len(VARIANTS):
-        raise AssertionError("VARIANTS repeats an entry, which would publish duplicate configs")
+    # thing the rest of this pipeline works hardest to avoid -- and so would two
+    # that differ in nothing but prefix_name, under two names.
+    links = [variant._replace(prefix_name="") for variant in VARIANTS]
+    if len(set(links)) != len(links):
+        raise AssertionError(
+            "VARIANTS repeats an entry, prefix_name aside, which would publish duplicate configs"
+        )
 
     # The tested endpoint is held to the same rules: the check is TLS too, and
     # a check that cannot connect fails every node.
@@ -774,42 +820,89 @@ def naming_identity(node: Node) -> tuple:
 # Every published name ends in " | <6 hex>". This project's own configs.txt is
 # one of its sources -- that is what lets a node upstream has dropped stay in
 # the list as long as it keeps passing -- so a node routinely arrives with that
-# suffix already on it. Appending another would grow the name by six characters
-# a day, and because the name is part of the link, configs.txt would be
-# rewritten and committed daily even when nothing had changed.
+# suffix already on it, and with its variant's prefix_name in front. Adding
+# either again would grow the name every day, and because the name is part of
+# the link, configs.txt would be rewritten and committed daily even when
+# nothing had changed.
 _OWN_HASH_SUFFIX = re.compile(r"(?: \| [0-9a-f]{6})+$")
+
+# The variant positions a name read back is tried against. The copy of a node
+# that comes back from configs.txt is its first variant's, so position 0 is the
+# one met; the rest is margin.
+_RECOGNISED_VARIANTS = 16
+
+
+def _digest(identity: str, variant: int, prefix: str) -> str:
+    """The six hex digits that end a published name.
+
+    The variant's position and its prefix_name are mixed in, each only when it
+    is not the first or not empty, so a name without a prefix keeps the digest
+    earlier versions gave it.
+    """
+    seed = identity
+    if variant:
+        seed += f"|variant-{variant}"
+    if prefix:
+        seed += f"|prefix-{prefix}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:6]
 
 
 def source_comment(node: Node) -> str:
-    """The node's display name with any hash :func:`make_tag` appended removed.
+    """The node's display name without what :func:`make_tag` added to it: the
+    hash at the end and the variant's prefix_name in front.
 
-    Matches the lowercase 6-hex digest this file emits, so a source comment
-    that merely contains a pipe is left alone. Strips a whole run of them, to
-    clean up any name that grew before this existed.
+    The hash matches the lowercase 6-hex digest this file emits, so a source
+    comment that merely contains a pipe is left alone; a whole run of them is
+    stripped, to clean up any name that grew before this existed.
+
+    The prefix is found through the hash, which covers it: the leading words
+    whose removal makes the digest come out right are the ones this project
+    put there, under whatever prefix_name the run that published them had --
+    so renaming a prefix leaves no trace of the old one. When no split makes it
+    come out right, the node itself has changed since -- a rule that now
+    normalises it differently changes its digest -- and a prefix_name of the
+    current list is taken off the front instead.
     """
-    return _OWN_HASH_SUFFIX.sub("", node.tag.strip()).strip()
+    name = node.tag.strip()
+    suffix = _OWN_HASH_SUFFIX.search(name)
+    if not suffix:
+        return name
+    head = name[: suffix.start()].strip()
+    digest = name[-6:]
+    identity = repr(naming_identity(node))
+    words = head.split(" ")
+    for cut in range(len(words)):
+        prefix = " ".join(words[:cut])
+        if any(_digest(identity, variant, prefix) == digest
+               for variant in range(_RECOGNISED_VARIANTS)):
+            return " ".join(words[cut:])
+    for prefix in sorted({v.prefix_name for v in VARIANTS if v.prefix_name}, key=len, reverse=True):
+        if head.startswith(prefix + " "):
+            return head[len(prefix) + 1:]
+    return head
 
 
 def make_tag(node: Node, variant: int = 0) -> str:
-    """The published name: the source's own comment, then a short content hash.
+    """The name variant ``variant`` publishes ``node`` under: the variant's
+    prefix_name, the source's own comment, then a short content hash.
 
     The hash comes from :func:`naming_identity`, so the same upstream node
     always gets the same name and an unchanged upstream produces an unchanged
     configs.txt -- including across a change of exit address or masking, and
     across this project re-reading its own output.
 
-    ``variant`` is mixed in so that a node published under several variants
-    does not appear in a client several times under one name, which would
-    make the variants impossible to tell apart -- and choosing between them is
-    the point of publishing more than one. The index is mixed in rather than
-    the fm and dialMode values themselves, so that retuning a fragment still
-    does not rename anything. Variant 0 is left unmixed, so a single-variant
-    list produces exactly the names it always has.
+    The variant's position is mixed in so that a node published under several
+    variants does not appear in a client several times under one name, even
+    when two variants share a prefix_name -- choosing between them is the point
+    of publishing more than one. The position is mixed in rather than the
+    values the variant sets, so that retuning a fragment still does not rename
+    anything. The prefix_name is mixed in as well, which is what lets
+    :func:`source_comment` tell it from the comment when the name comes back.
+    The first variant, without a prefix_name, gives exactly the names earlier
+    versions gave.
     """
-    seed = repr(naming_identity(node))
-    if variant:
-        seed += f"|variant-{variant}"
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:6]
+    prefix = VARIANTS[variant].prefix_name
+    digest = _digest(repr(naming_identity(node)), variant, prefix)
     comment = source_comment(node)
     if KEEP_SOURCE_COMMENT and comment:
         head = comment
@@ -818,7 +911,7 @@ def make_tag(node: Node, variant: int = 0) -> str:
         head = f"{node.host} | {node.scheme}-{transport}"
     # The port used to be part of the name, to separate a node from its twin
     # on the other port. There are no twins now, and every node is on 443.
-    return f"{NAME_PREFIX}{head} | {digest}"
+    return f"{prefix} {head} | {digest}" if prefix else f"{head} | {digest}"
 
 
 # --- drivers --------------------------------------------------------------
@@ -918,10 +1011,11 @@ def finalise(nodes: list[Node], stats: dict | None = None) -> list[Node]:
             apply_deferred_params(copy, variant)
             set_published_security(copy, variant)
             rule_10_point_at_output(copy, variant)
-            if RENAME_NODES and len(VARIANTS) > 1:
+            if RENAME_NODES:
                 # Named from the node as tested, not from the copy: then no
                 # field of a variant -- its address, its security, anything it
-                # adds -- can rename what is published. Only the index can.
+                # adds -- can rename what is published. Only its position and
+                # its prefix_name can.
                 copy.tag = make_tag(node, variant)
             published.append(copy)
     counts["published"] = len(published)

@@ -45,7 +45,10 @@ from nodes import Node, parse_line  # noqa: E402
 SHIPPED_VARIANTS = transform.VARIANTS
 SHIPPED_VARIANTS_ENCODED = transform.VARIANTS_ENCODED
 
+# Without a prefix_name, so the names the tests below see are the ones earlier
+# versions gave; prefixes are tested on their own.
 REFERENCE_VARIANT = transform.Variant(
+    prefix_name="",
     ip="188.114.98.0",
     port="443",
     fm=(
@@ -67,12 +70,19 @@ REFERENCE_VARIANT = transform.Variant(
         "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
     ),
 )
+
+
+def encode(variant: transform.Variant) -> tuple:
+    """The VARIANTS_ENCODED entry of ``variant``: the plain fields as they are,
+    the rest percent-encoded -- by field name, as transform.py writes them."""
+    return tuple(
+        value if field in transform.PLAIN_FIELDS else quote(value, safe="")
+        for field, value in zip(transform.Variant._fields, variant)
+    )
+
+
 transform.VARIANTS = [REFERENCE_VARIANT]
-transform.VARIANTS_ENCODED = [(
-    REFERENCE_VARIANT.ip,
-    REFERENCE_VARIANT.port,
-    *(quote(value, safe="") for value in REFERENCE_VARIANT[2:]),
-)]
+transform.VARIANTS_ENCODED = [encode(REFERENCE_VARIANT)]
 transform._self_check()      # the reference has to be a legal variant itself
 
 FAILURES: list[str] = []
@@ -470,9 +480,9 @@ twins = transform.transform(
 check(len(twins) == 1, "upgrade alpn: ws nodes differing only in source alpn deduplicate")
 
 # --- published variants ----------------------------------------------------
-# Every healthy node is published once per variant -- (ip, port, fm, dialMode,
-# security, ech, echOutbound, fp, cs) -- its variants adjacent, so N survivors
-# and I variants make N * I configs in one file.
+# Every healthy node is published once per variant -- (prefix_name, ip, port,
+# fm, dialMode, security, ech, echOutbound, fp, cs) -- its variants adjacent,
+# so N survivors and I variants make N * I configs in one file.
 
 
 def entry(**fields: str) -> tuple:
@@ -490,12 +500,10 @@ def entry(**fields: str) -> tuple:
 
 def set_variants(*entries: tuple) -> None:
     """Patch VARIANTS and VARIANTS_ENCODED together, so _self_check still has
-    a consistent pair of lists to look at. ip and port are written plainly,
-    the rest percent-encoded, as in transform.py."""
-    transform.VARIANTS_ENCODED = [
-        (ip, port, *(quote(value, safe="") for value in rest)) for ip, port, *rest in entries
-    ]
+    a consistent pair of lists to look at, written as transform.py writes
+    them."""
     transform.VARIANTS = [transform.Variant(*entry) for entry in entries]
+    transform.VARIANTS_ENCODED = [encode(variant) for variant in transform.VARIANTS]
 
 
 def survivors(count: int) -> list[Node]:
@@ -692,6 +700,13 @@ try:
         ("a cs that is all typos", (entry(cs="TLS_AES_128_GCM"),), "does not know"),
         ("a cs naming a suite twice",
          (entry(cs="TLS_AES_128_GCM_SHA256:TLS_AES_128_GCM_SHA256"),), "twice"),
+        # prefix_name, which starts every name its variant publishes
+        ("a prefix_name with a space after it", (entry(prefix_name="F&F "),), "spaces around it"),
+        ("a prefix_name with a space before it", (entry(prefix_name=" F&F"),), "spaces around it"),
+        ("a prefix_name with a line break", (entry(prefix_name="F&F\nX"),), "control character"),
+        ("a prefix_name with a tab", (entry(prefix_name="F\tF"),), "control character"),
+        ("two entries differing only in prefix_name",
+         (entry(prefix_name="F&F"), entry(prefix_name="ECH")), "duplicate"),
     ):
         set_variants(*entries)
         try:
@@ -718,6 +733,12 @@ try:
          (entry(security="none", port="8080", fm='{"tcp": []}', dial_mode="code-1"),)),
         ("the same node with and without TLS",
          (entry(), entry(security="none", port="8080"))),
+        ("no prefix_name", (entry(prefix_name=""),)),
+        ("a prefix_name of several words", (entry(prefix_name="Fast ECH"),)),
+        ("a prefix_name of symbols and emoji", (entry(prefix_name="F&F 🇩🇪 #1 | x"),)),
+        ("an emoji joined by a zero-width joiner", (entry(prefix_name="🏳️‍🌈"),)),
+        ("two variants sharing a prefix_name",
+         (entry(prefix_name="IPv6"), entry(prefix_name="IPv6", ip="104.16.0.1"))),
     ]
     for port in transform.PORTS_MAPPED_TO_8080:
         accepted_cases.append((f"none on Cloudflare HTTP port {port}",
@@ -730,7 +751,7 @@ try:
         except AssertionError as error:
             check(False, f"variants: _self_check accepts {label} ({error})")
 
-    # Entries that are not nine strings at all -- including every shape the
+    # Entries that are not ten strings at all -- including every shape the
     # list has had before, so an old entry pasted back in is refused clearly.
     for label, bad in (
         ("an entry of the old two-field shape", ("{}", "")),
@@ -738,16 +759,19 @@ try:
         ("an entry of the old six-field shape", ("{}", "", "", "", "unsafe", "")),
         ("an entry of the old eight-field shape",
          ("188.114.98.0", "443", "{}", "", "", "", "unsafe", "")),
+        ("an entry of the old nine-field shape, without a prefix_name", entry()[1:]),
         ("an entry with a field that is not a string", entry()[:5] + (None,) + entry()[6:]),
-        ("an entry with a port that is not a string", ("188.114.98.0", 443) + entry()[2:]),
+        ("an entry with a port that is not a string",
+         tuple(443 if field == "port" else value
+               for field, value in zip(transform.Variant._fields, entry()))),
     ):
         transform.VARIANTS_ENCODED = [bad]
         try:
             transform._self_check()
             check(False, f"variants: _self_check rejects {label}")
         except AssertionError as error:
-            check("not an (ip, port, fm, dialMode, security, ech, echOutbound, fp, cs) entry"
-                  in str(error), f"variants: _self_check rejects {label}")
+            check("not a (prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs)"
+                  " entry" in str(error), f"variants: _self_check rejects {label}")
 finally:
     transform.VARIANTS, transform.VARIANTS_ENCODED = real_variants, real_variants_encoded
 
@@ -759,14 +783,17 @@ real_variants_mip = transform.VARIANTS
 real_variants_encoded_mip = transform.VARIANTS_ENCODED
 real_healthcheck_mip = (transform.HEALTHCHECK_ADDRESS, transform.HEALTHCHECK_PORT)
 try:
-    DECODED = tuple(getattr(DEFAULT, field) for field in transform.Variant._fields[2:])
+    def at(ip: str, port: str) -> tuple:
+        """The default variant, published on ip:port."""
+        return tuple(DEFAULT._replace(ip=ip, port=port))
+
     ENDPOINTS = [
         ("188.114.98.0", "443"),
         ("104.16.0.1", "2053"),
         ("2606:4700::1", "8443"),
         ("cf.example.net", "2096"),
     ]
-    set_variants(*[endpoint + DECODED for endpoint in ENDPOINTS])
+    set_variants(*[at(*endpoint) for endpoint in ENDPOINTS])
 
     pool = survivors(3)
     tested_endpoints = {(n.address, n.port) for n in pool}
@@ -829,7 +856,7 @@ try:
         ("a port that is not a number", ("188.114.98.0", "https"), "HTTPS ports"),
         ("an empty port", ("188.114.98.0", ""), "HTTPS ports"),
     ):
-        set_variants(endpoint + DECODED)
+        set_variants(at(*endpoint))
         try:
             transform._self_check()
             check(False, f"endpoints: _self_check rejects {label}")
@@ -837,7 +864,7 @@ try:
             check(expected in str(error), f"endpoints: _self_check rejects {label}")
 
     for port in transform.PORTS_MAPPED_TO_443:
-        set_variants(("188.114.98.0", port) + DECODED)
+        set_variants(at("188.114.98.0", port))
         try:
             transform._self_check()
             check(True, f"endpoints: _self_check accepts Cloudflare HTTPS port {port}")
@@ -846,13 +873,13 @@ try:
 
     # The same address twice publishes the same link twice; two addresses with
     # the same parameters are exactly what this feature is for.
-    set_variants(ENDPOINTS[0] + DECODED, ENDPOINTS[0] + DECODED)
+    set_variants(at(*ENDPOINTS[0]), at(*ENDPOINTS[0]))
     try:
         transform._self_check()
         check(False, "endpoints: _self_check rejects the same address listed twice")
     except AssertionError as error:
         check("duplicate" in str(error), "endpoints: _self_check rejects the same address listed twice")
-    set_variants(*[endpoint + DECODED for endpoint in ENDPOINTS])
+    set_variants(*[at(*endpoint) for endpoint in ENDPOINTS])
     try:
         transform._self_check()
         check(True, "endpoints: _self_check accepts one parameter set on four addresses")
@@ -860,7 +887,7 @@ try:
         check(False, f"endpoints: _self_check accepts one parameter set on four addresses ({error})")
 
     # The health-check endpoint is held to the same rules.
-    set_variants(ENDPOINTS[0] + DECODED)
+    set_variants(at(*ENDPOINTS[0]))
     transform.HEALTHCHECK_PORT = "8080"
     try:
         transform._self_check()
@@ -887,6 +914,12 @@ try:
     transform.VARIANTS = real_variants_golden + [real_variants_golden[0]._replace(ip="104.16.0.1")]
     check(transform.finalise([golden], {})[1].tag == "name | 917341",
           "naming: a second variant's name is the one earlier versions gave it")
+    # A prefix_name is covered by the hash, so it gives a name a hash of its own.
+    transform.VARIANTS = [real_variants_golden[0]._replace(prefix_name="F&F"),
+                          real_variants_golden[0]._replace(prefix_name="ECH", ip="104.16.0.1")]
+    check([n.tag for n in transform.finalise([golden], {})]
+          == ["F&F name | 0649ee", "ECH name | df2db7"],
+          "naming: a prefixed name is the one it was first published under")
 finally:
     transform.VARIANTS = real_variants_golden
 
@@ -976,6 +1009,153 @@ for cycle in range(1, 6):
 final_tag = parse_line(current).tag
 check(final_tag.count("|") == 1,
       "naming: exactly one hash remains on the name after five cycles")
+
+# --- name prefixes ---------------------------------------------------------
+# Each variant's prefix_name starts the name of every config it publishes.
+# configs.txt is a source, so a name comes back with that prefix on it, and it
+# has to come off again -- under whatever prefix_name the run that published it
+# had -- or a name would grow a prefix a day, and renaming a prefix would leave
+# the old one behind.
+
+
+def named(tag: str, head: str) -> bool:
+    """Whether ``tag`` is ``head`` followed by the hash a published name ends in."""
+    stem, separator, digest = tag.rpartition(" | ")
+    return (stem == head and bool(separator) and len(digest) == 6
+            and set(digest) <= set("0123456789abcdef"))
+
+
+def read_back(links: list[str]) -> list[str]:
+    """``links`` read as a source and published again, as the next run does."""
+    nodes = transform.transform([parse_line(line) for line in links], {})
+    return [node.to_link() for node in transform.finalise(nodes, {})]
+
+
+def heads_of(links: list[str]) -> list[str]:
+    """The names of ``links`` without their hash."""
+    return [parse_line(line).tag.rpartition(" | ")[0] for line in links]
+
+
+real_variants_prefix = transform.VARIANTS
+real_variants_encoded_prefix = transform.VARIANTS_ENCODED
+try:
+    P1 = transform.Variant(*entry(prefix_name="F&F", fm='{"tcp": []}', fp="unsafe",
+                                  cs="TLS_AES_256_GCM_SHA384"))
+    P2 = transform.Variant(*entry(prefix_name="ECH", ech=ECH_DNS, fp="chrome"))
+    P3 = transform.Variant(*entry(prefix_name="IPv6", ip="2606:4700::1", fp="chrome"))
+    set_variants(P1, P2, P3)
+    pair = [n for i in range(2) for n in one(**{**BASE, "host": f"p{i}.example"})]
+    published = transform.finalise(pair, {})
+    check(all(named(n.tag, head)
+              for n, head in zip(published, ["F&F name", "ECH name", "IPv6 name"] * 2)),
+          "prefix: each variant's prefix_name starts the names it publishes")
+    check(len({n.tag for n in published}) == 6,
+          "prefix: and every published config still has a name of its own")
+    links = [n.to_link() for n in published]
+    check("#F%26F%20name%20%7C%20" in links[0], "prefix: the name reaches the link percent-encoded")
+    check(transform._decode_variants([encode(P1._replace(prefix_name="A%20B"))])[0].prefix_name
+          == "A%20B", "prefix: a prefix_name is used as written, never percent-decoded")
+
+    # Read back and published again, as every run does: the same file, however
+    # many times round.
+    current = links
+    for cycle in range(1, 4):
+        current = read_back(current)
+        check(current == links, f"prefix: cycle {cycle} of reading configs.txt back emits it unchanged")
+
+    # Whatever the list becomes, the next run names every config after it
+    # alone: no trace of a prefix it no longer has, and none of them twice.
+    for label, variants, heads in (
+        ("renaming a prefix", (P1._replace(prefix_name="Frag"), P2, P3),
+         ["Frag name", "ECH name", "IPv6 name"]),
+        ("reordering the variants", (P3, P1, P2), ["IPv6 name", "F&F name", "ECH name"]),
+        ("emptying a prefix", (P1._replace(prefix_name=""), P2, P3),
+         ["name", "ECH name", "IPv6 name"]),
+        ("a prefix of several words", (P1._replace(prefix_name="Fast F&F"), P2, P3),
+         ["Fast F&F name", "ECH name", "IPv6 name"]),
+        ("removing the first variant", (P2, P3), ["ECH name", "IPv6 name"]),
+        ("adding a variant in front",
+         (transform.Variant(*entry(prefix_name="New", ip="104.16.0.1")), P1, P2, P3),
+         ["New name", "F&F name", "ECH name", "IPv6 name"]),
+    ):
+        set_variants(*variants)
+        after = read_back(links)
+        check(heads_of(after) == heads * 2, f"prefix: {label} takes over in the next run's names")
+        check(read_back(after) == after, f"prefix: after {label}, the run after that changes nothing")
+    set_variants(P1, P2, P3)
+
+    # A list published before prefixes existed takes them on, comment intact.
+    set_variants(*(v._replace(prefix_name="") for v in (P1, P2, P3)))
+    legacy = [n.to_link() for n in transform.finalise(pair, {})]
+    check(heads_of(legacy) == ["name"] * 6, "prefix: (an unprefixed list to start from)")
+    set_variants(P1, P2, P3)
+    check(read_back(legacy) == links, "prefix: an unprefixed list read back is published with its prefixes")
+
+    # A config that comes back without its node's first variant -- copied
+    # alone into some other list, say -- is recognised all the same, even
+    # under a prefix renamed since.
+    set_variants(P1, P2._replace(prefix_name="Encrypted"), P3)
+    check(heads_of(read_back([links[1]])) == ["F&F name", "Encrypted name", "IPv6 name"],
+          "prefix: a later variant's config read back alone sheds its prefix too")
+    set_variants(P1, P2, P3)
+
+    # A comment that starts with a prefix's own word keeps it: only what the
+    # pipeline added comes off.
+    set_variants(P2, P1)
+    echo = [n.to_link() for n in transform.finalise(one(**{**BASE, "tag": "ECH node"}), {})]
+    check(heads_of(echo) == ["ECH ECH node", "F&F ECH node"],
+          "prefix: a comment starting with a prefix's word is published whole")
+    check(read_back(echo) == echo, "prefix: and read back, keeps that word")
+    set_variants(P1, P2, P3)
+
+    # A node that has changed since it was published has a new hash, which no
+    # longer covers the prefix on its old name. The prefix still comes off.
+    def moved(line: str) -> str:
+        node = parse_line(line)
+        node.set("path", "/moved")
+        return node.to_link()
+
+    changed = read_back([moved(line) for line in links])
+    check(heads_of(changed) == ["F&F name", "ECH name", "IPv6 name"] * 2,
+          "prefix: a node changed since it was published sheds its old prefix too")
+    check(not set(parse_line(line).tag for line in changed) & set(parse_line(line).tag for line in links),
+          "prefix: (the change did reach the hash, so that is the case tested)")
+    check(read_back(changed) == changed, "prefix: and once renamed, it stays as it is")
+
+    # A list of one variant prefixes its names as well.
+    set_variants(P1)
+    check(named(transform.finalise(one(**BASE), {})[0].tag, "F&F name"),
+          "prefix: a list of one variant prefixes its names too")
+
+    # Two variants sharing a prefix still name their configs apart.
+    set_variants(P3, P3._replace(ip="2606:4700::2"))
+    shared = [n.to_link() for n in transform.finalise(one(**BASE), {})]
+    check(heads_of(shared) == ["IPv6 name"] * 2 and len({parse_line(line).tag for line in shared}) == 2,
+          "prefix: two variants sharing a prefix still name each config apart")
+    check(read_back(shared) == shared, "prefix: and read back, both keep their names")
+
+    # Generated names are prefixed too.
+    set_variants(P1, P2, P3)
+    real_keep = transform.KEEP_SOURCE_COMMENT
+    try:
+        transform.KEEP_SOURCE_COMMENT = False
+        generated = [n.to_link() for n in transform.finalise(one(**BASE), {})]
+        check(heads_of(generated) == [f"{p} a.example | vless-ws" for p in ("F&F", "ECH", "IPv6")],
+              "prefix: a generated name is prefixed like a source's comment")
+        check(read_back(generated) == generated, "prefix: and read back, stays as it is")
+    finally:
+        transform.KEEP_SOURCE_COMMENT = real_keep
+
+    # With renaming off, a source's name is published as it is: no prefix, no hash.
+    real_rename = transform.RENAME_NODES
+    try:
+        transform.RENAME_NODES = False
+        check([n.tag for n in transform.finalise(one(**BASE), {})] == ["name"] * 3,
+              "prefix: with RENAME_NODES off, a source's name is published untouched")
+    finally:
+        transform.RENAME_NODES = real_rename
+finally:
+    transform.VARIANTS, transform.VARIANTS_ENCODED = real_variants_prefix, real_variants_encoded_prefix
 check(final_tag == baseline_name,
       "naming: five cycles of re-ingestion leave the name the first build gave it")
 
@@ -1100,14 +1280,18 @@ finally:
 
 # --- masking constants round trip ------------------------------------------
 
-# Every percent-encoded field of every variant, by name: ip and port are
-# written plainly and so are not part of this; security is.
+# Every percent-encoded field of every variant, by name: prefix_name, ip and
+# port are written plainly and so are not part of this; security is.
 constant_pairs = []
 for _i, (_v, _e) in enumerate(zip(SHIPPED_VARIANTS, SHIPPED_VARIANTS_ENCODED)):
     _encoded = dict(zip(transform.Variant._fields, _e))
-    for _field in transform.Variant._fields[2:]:
-        constant_pairs.append((f"VARIANTS[{_i}].{_field}", _encoded[_field], getattr(_v, _field)))
-check(len(constant_pairs) == (len(transform.Variant._fields) - 2) * len(SHIPPED_VARIANTS),
+    for _field in transform.Variant._fields:
+        if _field not in transform.PLAIN_FIELDS:
+            constant_pairs.append((f"VARIANTS[{_i}].{_field}", _encoded[_field], getattr(_v, _field)))
+    check(all(getattr(_v, field) == _encoded[field] for field in transform.PLAIN_FIELDS),
+          f"constants: VARIANTS[{_i}]'s prefix_name, ip and port are used exactly as written")
+check(len(constant_pairs)
+      == (len(transform.Variant._fields) - len(transform.PLAIN_FIELDS)) * len(SHIPPED_VARIANTS),
       "constants: every encoded field of every shipped variant is round-tripped")
 for name, encoded, decoded in constant_pairs:
     check(quote(decoded, safe="") == encoded, f"constants: {name} survives a decode/encode cycle")
@@ -1431,7 +1615,8 @@ finally:
 # the list as configured in transform.py is held to account. _self_check has
 # already accepted it on import, so what is left is what that cannot know.
 check(len(SHIPPED_VARIANTS) >= 1, "shipped: at least one variant is configured")
-check(len(set(SHIPPED_VARIANTS)) == len(SHIPPED_VARIANTS), "shipped: no variant is listed twice")
+check(len({v._replace(prefix_name="") for v in SHIPPED_VARIANTS}) == len(SHIPPED_VARIANTS),
+      "shipped: no variant is listed twice, whatever its prefix_name")
 real_variants_shipped = transform.VARIANTS
 try:
     transform.VARIANTS = SHIPPED_VARIANTS
@@ -1447,6 +1632,9 @@ try:
     shipped_names = [n.tag for n in transform.finalise(two_nodes, {})]
     check(len(shipped_names) == 2 * len(SHIPPED_VARIANTS) == len(set(shipped_names)),
           "shipped: every shipped variant of every node gets a name of its own")
+    check(all(name.startswith(f"{variant.prefix_name} name | " if variant.prefix_name else "name | ")
+              for name, variant in zip(shipped_names, SHIPPED_VARIANTS * 2)),
+          "shipped: each shipped variant's names start with its prefix_name")
 finally:
     transform.VARIANTS = real_variants_shipped
 
@@ -1929,6 +2117,10 @@ check(all(
     and all(node.get(key) == value for key, value in variant.params.items())
     for node, variant in zip((parse_line(line) for line in emitted), SHIPPED_VARIANTS)
 ), "finalise: each published line carries its own shipped variant, in order")
+check(all(
+    named(parse_line(line).tag, f"{variant.prefix_name} ok" if variant.prefix_name else "ok")
+    for line, variant in zip(emitted, SHIPPED_VARIANTS)
+), "finalise: each published line is named with its own shipped variant's prefix_name")
 published = parse_line(emitted[0])
 # Byte-exact: each shipped parameter appears in its line exactly as written in
 # VARIANTS_ENCODED -- whatever it is, empty or not.
@@ -1974,7 +2166,8 @@ check(len(emitted) == len(SHIPPED_VARIANTS),
       "dedup: four spellings of one node yield one published node per variant")
 # Names are percent-encoded on the wire, so decode before comparing.
 names = [parse_line(l).tag for l in emitted]
-check(all(n.startswith("FIRST NAME") for n in names),
+check(all(named(n, f"{v.prefix_name} FIRST NAME" if v.prefix_name else "FIRST NAME")
+          for n, v in zip(names, SHIPPED_VARIANTS)),
       "dedup: the surviving copy keeps its source comment in the published name")
 
 # Order-insensitivity at the identity level, independent of the build.
