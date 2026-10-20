@@ -220,7 +220,7 @@ VARIANTS_ENCODED = [
         # security
         "tls",
         # ech
-        "cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1",
+        "crypto.cloudflare.com%2Budp%3A%2F%2F1.1.1.1",
         # echOutbound
         "",
         # fp
