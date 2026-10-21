@@ -871,6 +871,73 @@ try:
         except AssertionError as error:
             check(False, f"endpoints: _self_check accepts Cloudflare HTTPS port {port} ({error})")
 
+    # A loopback address is a relay on the user's own device -- an SNI-spoofing
+    # tool, say -- so any port is the relay's own, with TLS or without. Every
+    # other address still needs one of Cloudflare's ports.
+    def relay(ip: str, port: str, security: str = "tls") -> tuple:
+        """The default variant, published through a relay at ip:port."""
+        variant = DEFAULT._replace(ip=ip, port=port, security=security)
+        if security == "none":
+            variant = variant._replace(fp="", cs="", ech="", ech_outbound="")
+        return tuple(variant)
+
+    for ip, port, security in (
+        ("127.0.0.1", "40443", "tls"),
+        ("127.0.0.1", "40443", "none"),
+        ("127.0.0.1", "1", "tls"),
+        ("127.0.0.1", "65535", "tls"),
+        ("127.0.0.2", "443", "tls"),
+        ("::1", "1080", "tls"),
+    ):
+        label = f"a loopback relay on {transform.endpoint_text(ip, port)} with security={security}"
+        set_variants(relay(ip, port, security))
+        try:
+            transform._self_check()
+            check(True, f"endpoints: _self_check accepts {label}")
+        except AssertionError as error:
+            check(False, f"endpoints: _self_check accepts {label} ({error})")
+    for label, ip, port, expected in (
+        ("port 0 on a loopback relay", "127.0.0.1", "0", "port number"),
+        ("port 65536 on a loopback relay", "127.0.0.1", "65536", "port number"),
+        ("a loopback port with a letter in it", "127.0.0.1", "4o443", "port number"),
+        ("a loopback port with a leading zero", "127.0.0.1", "040443", "port number"),
+        ("an empty loopback port", "::1", "", "port number"),
+        ("a relay's port on a Cloudflare address", "188.114.98.0", "40443", "HTTPS ports"),
+        ("a relay's port on a private address", "192.168.1.1", "40443", "HTTPS ports"),
+        ("localhost written as a name", "localhost", "40443", "HTTPS ports"),
+    ):
+        set_variants(relay(ip, port))
+        try:
+            transform._self_check()
+            check(False, f"endpoints: _self_check rejects {label}")
+        except AssertionError as error:
+            check(expected in str(error), f"endpoints: _self_check rejects {label}")
+
+    # Published through the relay, and read back from configs.txt: the relay's
+    # copy is dropped by rule 4 -- its port is none of Cloudflare's -- and its
+    # node comes back through the other variant, published again unchanged,
+    # wherever the relay stands in the list.
+    for order in ("second", "first"):
+        variants = [at("188.114.98.0", "443"), relay("127.0.0.1", "40443")]
+        if order == "first":
+            variants.reverse()
+        set_variants(*variants)
+        relayed = [n.to_link() for n in transform.finalise(survivors(2), {})]
+        through_relay = [parse_line(line) for line in relayed if "@127.0.0.1:40443?" in line]
+        check(len(through_relay) == 2, f"endpoints: with the relay {order}, each node goes through it once")
+        check(all(n.get("sni") == n.host and n.security == "tls" for n in through_relay),
+              f"endpoints: with the relay {order}, its copies keep TLS and the node's SNI")
+        stats = {}
+        collapsed = transform.transform([parse_line(line) for line in relayed], stats)
+        check(len(collapsed) == 2 and stats.get("dropped_rule_4_port") == 2,
+              f"endpoints: with the relay {order}, read back, its copies are dropped and the nodes stay")
+        check([n.to_link() for n in transform.finalise(collapsed, {})] == relayed,
+              f"endpoints: with the relay {order}, the nodes are published again unchanged")
+    set_variants(relay("127.0.0.1", "40443"))
+    alone = [n.to_link() for n in transform.finalise(survivors(2), {})]
+    check(transform.transform([parse_line(line) for line in alone], {}) == [],
+          "endpoints: a list of relays alone gets nothing back from configs.txt")
+
     # The same address twice publishes the same link twice; two addresses with
     # the same parameters are exactly what this feature is for.
     set_variants(at(*ENDPOINTS[0]), at(*ENDPOINTS[0]))

@@ -88,12 +88,16 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 #   ip, port     the address and port of the link itself -- not query
 #                parameters, so they are written plainly below, not
 #                percent-encoded. ip may be IPv4, IPv6 (without brackets; the
-#                link adds them) or a hostname.
+#                link adds them) or a hostname. A loopback ip -- 127.0.0.1 or
+#                ::1, written as an IP -- is a relay on the user's own device,
+#                an SNI-spoofing tool say, which makes the connection to
+#                Cloudflare itself; its port is whatever the relay listens on.
 #   security     "tls" or "none". Every node is tested over TLS whatever this
 #                says; it only decides what is published. It fixes which
 #                ports are usable, exactly as rules 7 and 8 do on the way in:
 #                tls needs one of Cloudflare's HTTPS ports (PORTS_MAPPED_TO_443),
-#                none one of its HTTP ports (PORTS_MAPPED_TO_8080). A none
+#                none one of its HTTP ports (PORTS_MAPPED_TO_8080) -- except on
+#                a loopback ip, where any port is the relay's own. A none
 #                variant cannot carry ech, echOutbound, fp or cs -- they only
 #                exist inside TLS -- and its links drop the node's sni and alpn
 #                for the same reason.
@@ -204,15 +208,16 @@ VARIANTS_ENCODED = [
         "%3ATLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA%3ATLS_ECDHE_RSA_WITH_AES_256_CBC_SHA%3A"
         "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256%3ATLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
     ),
-    # As above, without a fragment or a cipher list, imitating Chrome's
-    # ClientHello, with ECH fetched from Cloudflare's DNS over UDP.
+    # Through an SNI-spoofing relay on the user's own device, listening on
+    # 127.0.0.1:40443, without a fragment or a cipher list, imitating
+    # Chrome's ClientHello.
     (
         # prefix_name
-        "ECH",
+        "Sni-Spoofing",
         # ip
-        "188.114.98.0",
+        "127.0.0.1",
         # port
-        "443",
+        "40443",
         # fm
         "",
         # dialMode
@@ -220,7 +225,7 @@ VARIANTS_ENCODED = [
         # security
         "tls",
         # ech
-        "crypto.cloudflare.com%2Budp%3A%2F%2F1.1.1.1",
+        "",
         # echOutbound
         "",
         # fp
@@ -423,7 +428,7 @@ def endpoint_problem(ip: str, port: str, security: str = "tls") -> str | None:
     if ip.startswith("["):
         return f"{ip!r}: write an IPv6 address without brackets -- the link adds them"
     try:
-        ipaddress.ip_address(ip)
+        loopback = ipaddress.ip_address(ip).is_loopback
     except ValueError:
         # Not an IP. A hostname is fine -- a share link takes either -- but a
         # dotted run of digits that does not parse is a mistyped IPv4 address,
@@ -432,6 +437,17 @@ def endpoint_problem(ip: str, port: str, security: str = "tls") -> str | None:
             return f"{ip!r} is not a valid IPv4 address"
         if not _HOSTNAME.fullmatch(ip):
             return f"{ip!r} is neither an IP address nor a hostname"
+        loopback = False
+    # A loopback address is a relay on the user's own device, which makes the
+    # connection to Cloudflare itself, so its port is the relay's: any port.
+    # Read back from configs.txt, such a config is dropped by rule 4 and its
+    # node comes back through its other variants -- so a list of loopback
+    # variants alone would keep nothing upstream has dropped.
+    if loopback:
+        if not (port.isascii() and port.isdigit() and str(int(port)) == port
+                and 0 < int(port) < 65536):
+            return f"port {port!r} is not a port number from 1 to 65535"
+        return None
     # Cloudflare serves TLS on its HTTPS ports only, and plain HTTP on its HTTP
     # ports only. A config on the other family cannot connect -- and when
     # configs.txt is read back in as a source, rule 4, 7 or 8 drops it.
@@ -681,8 +697,8 @@ def rule_10_point_at_output(node: Node, variant: int = 0) -> None:
 
     Separate from the health-check endpoint on purpose: the check proves the
     node answers behind Cloudflare, which stays true whichever Cloudflare
-    address a published link names -- so a node tested once can be published
-    on as many addresses as there are variants.
+    address a published link names, or relay it goes through -- so a node
+    tested once can be published on as many addresses as there are variants.
     """
     node.address = VARIANTS[variant].ip
     node.port = VARIANTS[variant].port
